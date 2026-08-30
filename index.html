@@ -197,7 +197,7 @@
 /* ==================== 设备检测 ==================== */
 var isMobile = /Android|iPhone|iPad|iPod|Mobile|HarmonyOS/i.test(navigator.userAgent)
   || (window.matchMedia && matchMedia('(pointer: coarse)').matches);
-var DPR_CAP = isMobile ? 1.5 : 2;   // 手机降低渲染分辨率上限，保证流畅
+var DPR_CAP = 2;   // 渲染分辨率 2x 保证高清屏清晰；若老手机帧率不足会自动降级到 1.5
 
 /* ==================== 可调配置 ==================== */
 const CFG = {
@@ -226,6 +226,10 @@ const mouse = { x: 0, y: 0, tx: 0, ty: 0 };
 let cakeMode = false, cakeSpin = 0, lastT = 0, flameRange = null;
 let flameOut = false, flameOutT0 = 0;
 
+/* 蛋糕拖拽旋转 */
+let dragOn = false, dragX0 = 0, dragY0 = 0;
+let rotTargetY = 0, rotTargetX = 0, rotCurX = 0, lastDragT = -10;
+
 /* 2D 烟花（独立画布，位于变暗层之上） */
 const fwc = document.getElementById('fwCanvas');
 const fctx = fwc.getContext('2d');
@@ -233,6 +237,7 @@ const fwRockets = [];
 const fwParts = [];
 const fwFlashes = [];
 let fwNeedsClear = false;
+let fwW = 0, fwH = 0, fwDpr = 1;   // CSS 逻辑尺寸与设备像素比（画布按 DPR 高清渲染）
 
 const SHADER_VERT = `
   attribute float aSize;
@@ -262,7 +267,6 @@ const SHADER_FRAG = `
 `;
 
 /* ==================== 初始化 ==================== */
-init();
 function init() {
   initThree();
   initBackgroundParticles();
@@ -688,13 +692,21 @@ function animate() {
   bgPoints.rotation.y = t * 0.02;
   bgPoints.rotation.x = Math.sin(t * 0.07) * 0.05;
 
-  // 蛋糕成形后整体缓慢旋转，展示 3D 感
+  // 蛋糕成形后：手指拖动跟随旋转；静置 3 秒后恢复缓慢自转
   const dt = t - lastT; lastT = t;
-  if (cakeMode) { cakeSpin += dt * 0.16; textPoints.rotation.y = cakeSpin; }
+  if (cakeMode) {
+    if (t - lastDragT > 3) rotTargetY += dt * 0.16;
+    const k = 1 - Math.exp(-dt * 7);
+    cakeSpin += (rotTargetY - cakeSpin) * k;
+    rotCurX += (rotTargetX - rotCurX) * k;
+    textPoints.rotation.y = cakeSpin;
+    textPoints.rotation.x = rotCurX;
+  }
 
   updateTextParticles(t);
   updateCamera(t);
   updateFireworks2d(dt);
+  checkPerf(t);
 
   // 序列推进
   if (seq.active && !seq.finished && t >= seq.nextAt) {
@@ -791,8 +803,8 @@ function spawnBlessing() {
   const screen = document.getElementById('blessingScreen');
   screen.appendChild(el);
   const w = el.offsetWidth, h = el.offsetHeight;
-  const x = 8 + Math.random() * Math.max(8, fwc.width - w - 16);
-  const y = fwc.height * 0.09 + Math.random() * Math.max(8, fwc.height * 0.82 - h);
+  const x = 8 + Math.random() * Math.max(8, fwW - w - 16);
+  const y = fwH * 0.09 + Math.random() * Math.max(8, fwH * 0.82 - h);
   el.style.left = x + 'px';
   el.style.top = y + 'px';
 
@@ -803,8 +815,14 @@ function spawnBlessing() {
 
 /* ---------- 2D 烟花（声明在全局状态区，这里只放逻辑） ---------- */
 function resizeFwCanvas() {
-  fwc.width = window.innerWidth;
-  fwc.height = window.innerHeight;
+  fwDpr = Math.min(window.devicePixelRatio || 1, 2);
+  fwW = window.innerWidth;
+  fwH = window.innerHeight;
+  fwc.width = Math.round(fwW * fwDpr);
+  fwc.height = Math.round(fwH * fwDpr);
+  fwc.style.width = fwW + 'px';
+  fwc.style.height = fwH + 'px';
+  fctx.setTransform(fwDpr, 0, 0, fwDpr, 0, 0);   // 绘制坐标仍用 CSS 像素
 }
 
 /* 持续随机燃放：每隔一会儿从底部升起一颗烟花弹 */
@@ -817,10 +835,10 @@ function scheduleFirework(delay) {
 
 function launchFirework(nx, ny, color) {
   fwRockets.push({
-    x: nx * fwc.width,
-    y: fwc.height + 8,
-    ty: ny * fwc.height,
-    speed: fwc.height / (0.65 + Math.random() * 0.25),
+    x: nx * fwW,
+    y: fwH + 8,
+    ty: ny * fwH,
+    speed: fwH / (0.65 + Math.random() * 0.25),
     color: color,
   });
 }
@@ -828,7 +846,7 @@ function launchFirework(nx, ny, color) {
 function burstFirework(x, y, color) {
   const col = new THREE.Color(color);
   const n = isMobile ? 90 : 170;
-  const H = fwc.height;
+  const H = fwH;
 
   // 主色大圈
   for (let k = 0; k < n; k++) {
@@ -870,11 +888,11 @@ function burstFirework(x, y, color) {
 function updateFireworks2d(dt) {
   const hasContent = fwRockets.length > 0 || fwParts.length > 0 || fwFlashes.length > 0;
   if (!hasContent) {
-    if (fwNeedsClear) { fctx.clearRect(0, 0, fwc.width, fwc.height); fwNeedsClear = false; }
+    if (fwNeedsClear) { fctx.clearRect(0, 0, fwW, fwH); fwNeedsClear = false; }
     return;
   }
   fwNeedsClear = true;
-  fctx.clearRect(0, 0, fwc.width, fwc.height);
+  fctx.clearRect(0, 0, fwW, fwH);
   fctx.globalCompositeOperation = 'lighter';
 
   // 上升的烟花弹
@@ -895,7 +913,7 @@ function updateFireworks2d(dt) {
     f.age += dt;
     const p = f.age / 0.38;
     if (p >= 1) { fwFlashes.splice(i, 1); continue; }
-    const r = fwc.height * (0.025 + 0.11 * p);
+    const r = fwH * (0.025 + 0.11 * p);
     const grad = fctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, r);
     grad.addColorStop(0, 'rgba(255, 250, 235, ' + (0.55 * (1 - p)).toFixed(3) + ')');
     grad.addColorStop(1, 'rgba(255, 250, 235, 0)');
@@ -904,7 +922,7 @@ function updateFireworks2d(dt) {
   }
 
   // 绽放的粒子
-  const g = fwc.height * 0.13;
+  const g = fwH * 0.13;
   const now = performance.now();
   for (let i = fwParts.length - 1; i >= 0; i--) {
     const p = fwParts[i];
@@ -957,29 +975,65 @@ function toggleBgm() {
   }
 }
 
+/* 性能自适应：开局 3.5 秒测帧率，老手机帧率不足自动降到 1.5x 保流畅 */
+let perfT0 = null, perfFrames = 0, perfDone = false;
+
+function applyPixelRatio() {
+  const pr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+  renderer.setPixelRatio(pr);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  bgMat.uniforms.uPixelRatio.value = pr;
+  textMat.uniforms.uPixelRatio.value = pr;
+}
+
+function checkPerf(t) {
+  if (perfDone) return;
+  if (perfT0 === null) { perfT0 = t; perfFrames = 0; }
+  perfFrames++;
+  if (t - perfT0 >= 3.5) {
+    perfDone = true;
+    const fps = perfFrames / (t - perfT0);
+    if (fps < 45) { DPR_CAP = 1.5; applyPixelRatio(); }
+  }
+}
+
 function bindEvents() {
   document.getElementById('cakeBtn').addEventListener('click', openCake);
   document.getElementById('extBtn').addEventListener('click', extinguishCandle);
   document.getElementById('musicBtn').addEventListener('click', (e) => { e.stopPropagation(); toggleBgm(); });
   window.addEventListener('pointerdown', startBgm, { once: true });
+
+  // 手指/鼠标拖动：蛋糕跟随旋转（蛋糕阶段）
+  window.addEventListener('pointerdown', (e) => {
+    if (e.target && e.target.closest && e.target.closest('button')) return;
+    dragOn = true; dragX0 = e.clientX; dragY0 = e.clientY;
+  });
   window.addEventListener('pointermove', (e) => {
     mouse.tx = e.clientX / window.innerWidth - 0.5;
     mouse.ty = e.clientY / window.innerHeight - 0.5;
+    if (dragOn && cakeMode) {
+      rotTargetY += (e.clientX - dragX0) * 0.008;
+      rotTargetX = Math.max(-0.6, Math.min(0.6, rotTargetX + (e.clientY - dragY0) * 0.005));
+      dragX0 = e.clientX; dragY0 = e.clientY;
+      lastDragT = clock.getElapsedTime();
+    }
   });
+  window.addEventListener('pointerup', () => { dragOn = false; });
+  window.addEventListener('pointercancel', () => { dragOn = false; });
+
   function onResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
     resizeFwCanvas();
-    const pr = Math.min(window.devicePixelRatio, DPR_CAP);
-    renderer.setPixelRatio(pr);
-    bgMat.uniforms.uPixelRatio.value = pr;
-    textMat.uniforms.uPixelRatio.value = pr;
+    applyPixelRatio();
   }
   window.addEventListener('resize', onResize);
   window.addEventListener('orientationchange', onResize);
   if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
 }
+
+init();
 </script>
 </body>
 </html>
