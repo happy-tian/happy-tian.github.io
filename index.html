@@ -197,7 +197,7 @@
 /* ==================== 设备检测 ==================== */
 var isMobile = /Android|iPhone|iPad|iPod|Mobile|HarmonyOS/i.test(navigator.userAgent)
   || (window.matchMedia && matchMedia('(pointer: coarse)').matches);
-var DPR_CAP = 2;   // 渲染分辨率 2x 保证高清屏清晰；若老手机帧率不足会自动降级到 1.5
+var DPR_CAP = 99;   // 按手机原生分辨率渲染（最高清晰度）；帧率不足时自动分级降载: 原生→2x→1.5x
 
 /* ==================== 可调配置 ==================== */
 const CFG = {
@@ -252,7 +252,7 @@ const SHADER_VERT = `
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     float tw = 0.62 + 0.38 * sin(uTime * (1.2 + fract(aSeed) * 1.8) + aSeed * 6.2831);
     vAlpha = tw;
-    gl_PointSize = aSize * uPixelRatio * (300.0 / -mv.z);
+    gl_PointSize = aSize * uPixelRatio * (335.0 / -mv.z);
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -261,7 +261,9 @@ const SHADER_FRAG = `
   varying float vAlpha;
   void main() {
     float d = length(gl_PointCoord - 0.5);
-    float a = pow(smoothstep(0.5, 0.0, d), 1.8);
+    float glow = pow(smoothstep(0.5, 0.0, d), 3.0);   // 紧凑的外圈光晕
+    float core = smoothstep(0.16, 0.0, d) * 1.15;     // 实心亮核，锐利不糊
+    float a = min(glow + core, 1.0);
     gl_FragColor = vec4(vColor * vAlpha, a * vAlpha);
   }
 `;
@@ -991,9 +993,12 @@ function checkPerf(t) {
   if (perfT0 === null) { perfT0 = t; perfFrames = 0; }
   perfFrames++;
   if (t - perfT0 >= 3.5) {
-    perfDone = true;
     const fps = perfFrames / (t - perfT0);
-    if (fps < 45) { DPR_CAP = 1.5; applyPixelRatio(); }
+    perfT0 = t; perfFrames = 0;
+    if (fps >= 50) { perfDone = true; return; }                    // 流畅，锁定当前最高清
+    if (DPR_CAP > 2) { DPR_CAP = Math.min(window.devicePixelRatio || 1, 2); applyPixelRatio(); return; }  // 第1级: 原生→2x
+    if (DPR_CAP > 1.5) { DPR_CAP = 1.5; applyPixelRatio(); return; }                                       // 第2级: 2x→1.5x
+    perfDone = true;                                               // 已到底，保持 1.5x
   }
 }
 
