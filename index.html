@@ -206,13 +206,13 @@ const CFG = {
   transition: 1.1,          // 粒子聚形成文字的时长(秒)
   hold: 3,                  // 每段文字停留时长(秒)
   initialDelay: 1.4,        // 开场散乱粒子漂浮时长(秒)
-  sequence: [               // 依次出现的粒子文字
-    { text: '3',  worldWidth: 52 },
-    { text: '2',  worldWidth: 52 },
-    { text: '1',  worldWidth: 52 },
-    { text: 'hi 田', worldWidth: 84 },
-    { text: '祝你活出自己的太阳', worldWidth: 118, mobileLines: ['祝你活出', '自己的太阳'] },
-    { text: '生日快乐', worldWidth: 96 },
+  sequence: [               // 依次出现的粒子文字（worldWidth 调小 = 字更小更清晰）
+    { text: '3',  worldWidth: 20 },
+    { text: '2',  worldWidth: 20 },
+    { text: '1',  worldWidth: 20 },
+    { text: 'hi 田', worldWidth: 46 },
+    { text: '祝你活出自己的太阳', worldWidth: 84, mobileLines: ['祝你活出', '自己的太阳'] },
+    { text: '生日快乐', worldWidth: 52 },
   ],
 };
 
@@ -230,6 +230,9 @@ let flameOut = false, flameOutT0 = 0;
 let dragOn = false, dragX0 = 0, dragY0 = 0;
 let rotTargetY = 0, rotTargetX = 0, rotCurX = 0, lastDragT = -10;
 
+/* 文字阶段粒子缩小系数（点阵小颗粒；蛋糕阶段恢复 1 原尺寸） */
+let sizeScaleCur = 1, sizeScaleTarget = 1;
+
 /* 2D 烟花（独立画布，位于变暗层之上） */
 const fwc = document.getElementById('fwCanvas');
 const fctx = fwc.getContext('2d');
@@ -245,6 +248,7 @@ const SHADER_VERT = `
   attribute vec3  aColor;
   uniform float uTime;
   uniform float uPixelRatio;
+  uniform float uSizeScale;   // 文字阶段整体缩小粒子（蛋糕阶段恢复 1）
   varying vec3  vColor;
   varying float vAlpha;
   void main() {
@@ -252,7 +256,7 @@ const SHADER_VERT = `
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     float tw = 0.62 + 0.38 * sin(uTime * (1.2 + fract(aSeed) * 1.8) + aSeed * 6.2831);
     vAlpha = tw;
-    gl_PointSize = aSize * uPixelRatio * (335.0 / -mv.z);
+    gl_PointSize = aSize * uPixelRatio * uSizeScale * (335.0 / -mv.z);
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -302,6 +306,7 @@ function makePointsMaterial() {
     uniforms: {
       uTime: { value: 0 },
       uPixelRatio: { value: Math.min(window.devicePixelRatio, DPR_CAP) },
+      uSizeScale: { value: 1 },
     },
     vertexShader: SHADER_VERT,
     fragmentShader: SHADER_FRAG,
@@ -426,29 +431,40 @@ function sampleTextPixels(text, worldWidth) {
   const W = cv.width, H = cv.height;
   const scale = worldWidth / tw;
 
-  const collect = (step) => {
-    const pts = [];
+  // 点阵化：选一个网格步长，让采样点数不超过粒子池上限（保证每个粒子都有独立格点，不堆叠）
+  const countAt = (step) => {
+    let n = 0;
     for (let y = 0; y < H; y += step)
       for (let x = 0; x < W; x += step)
-        if (data[(y * W + x) * 4 + 3] > 110)
-          pts.push({ x: (x - W / 2) * scale, y: (H / 2 - y) * scale });
-    return pts;
+        if (data[(y * W + x) * 4 + 3] > 110) n++;
+    return n;
   };
-  let pts = collect(2);
-  if (pts.length < CFG.textParticles * 0.55) pts = collect(1); // 大字加密度
-  return pts;
+  let step = 1;
+  while (countAt(step) > CFG.textParticles) step++;
+  if (step < 2) step = 2;   // 最小步长 2：格点间距大于颗粒直径，保证点阵分明不粘连
+
+  // 按行列扫描顺序收集 → 天然形成整齐的横排竖列
+  const pts = [];
+  for (let y = 0; y < H; y += step)
+    for (let x = 0; x < W; x += step)
+      if (data[(y * W + x) * 4 + 3] > 110)
+        pts.push({ x: (x - W / 2) * scale, y: (H / 2 - y) * scale });
+
+  return { pts, spacing: step * scale };   // spacing = 相邻点阵的世界距离
 }
 
 function buildTextTargets(item) {
-  const pts = sampleTextPixels(item.text, item.worldWidth);
+  const { pts, spacing } = sampleTextPixels(item.text, item.worldWidth);
   const target = new Float32Array(CFG.textParticles * 3);
-  const n = pts.length;
+  const n = Math.max(1, pts.length);
   for (let i = 0; i < CFG.textParticles; i++) {
-    const p = pts[(Math.random() * n) | 0];
+    const p = pts[i % n];
+    const dup = Math.floor(i / n);   // 0 = 唯一格点（位置精准）；>0 = 该格点的补充粒子（在格内微散开）
+    const j = dup ? spacing * 0.5 : 0;
     const i3 = i * 3;
-    target[i3]     = p.x + (Math.random() - 0.5) * 0.35;
-    target[i3 + 1] = p.y + (Math.random() - 0.5) * 0.35;
-    target[i3 + 2] = (Math.random() - 0.5) * 6;
+    target[i3]     = p.x + (Math.random() - 0.5) * j;
+    target[i3 + 1] = p.y + (Math.random() - 0.5) * j;
+    target[i3 + 2] = (Math.random() - 0.5) * 0.8;   // 几乎压成一个平面 → 清晰不发散
   }
   return target;
 }
@@ -631,6 +647,7 @@ function showText(index) {
   const textArg = (isNarrow && item.mobileLines) ? item.mobileLines : item.text;
 
   morphTo(buildTextTargets({ text: textArg, worldWidth: effWidth }), makeWhiteColors(), CFG.transition);
+  sizeScaleTarget = isMobile ? 0.34 : 0.42;   // 文字阶段：小颗粒点阵，清晰不糊
   seq.nextAt = t + CFG.hold;
 }
 
@@ -710,6 +727,10 @@ function animate() {
   updateFireworks2d(dt);
   checkPerf(t);
 
+  // 文字粒子尺寸平滑过渡（文字小而清晰 / 蛋糕恢复原大）
+  sizeScaleCur += (sizeScaleTarget - sizeScaleCur) * Math.min(1, dt * 2.5);
+  textMat.uniforms.uSizeScale.value = sizeScaleCur;
+
   // 序列推进
   if (seq.active && !seq.finished && t >= seq.nextAt) {
     if (seq.idx < CFG.sequence.length - 1) showText(seq.idx + 1);
@@ -736,10 +757,11 @@ function openCake() {
   document.getElementById('cakeBtnWrap').classList.remove('show');
   startBgm();
 
-  // 文字粒子飞聚成双层樱花粉蛋糕，蜡烛点燃
+  // 文字粒子飞聚成双层樱花粉蛋糕，蜡烛点燃（粒子恢复原尺寸）
   const cake = buildCakeTargets();
   cakeMode = true;
   flameRange = cake.flameRange;
+  sizeScaleTarget = 1;
   morphTo(cake.targets, cake.colors, 2.4, { wobble: 0.09 });
 
   setTimeout(() => document.getElementById('hbTitle').classList.add('show'), 2400);
